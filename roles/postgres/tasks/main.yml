@@ -1,0 +1,212 @@
+- name: Configure PostgreSQL
+  become: true
+  block:
+    # без update_cache тк в pacman -Sy без -u делать нельзя
+    - name: Install PostgreSQL packages
+      community.general.pacman:
+        name: "{{ __pg_packages }}"
+        state: present
+
+    - name: Create /data
+      ansible.builtin.file:
+        path: /data
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Create data directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: postgres
+        group: postgres
+        mode: "0700"
+      loop:
+        - "{{ postgres__data_dir | dirname }}"
+        - "{{ postgres__data_dir }}"
+
+    - name: Init database cluster
+      ansible.builtin.command:
+        cmd: >-
+          {{ __pg_bin_dir }}/pg_ctl initdb -D {{ postgres__data_dir }}
+          -o "--encoding=UTF8 --locale=C.UTF-8 --auth-local=peer --auth-host=scram-sha-256"
+        creates: "{{ postgres__data_dir }}/PG_VERSION"
+      become_user: postgres
+
+    # меняю только свои строки, остальное как после initdb
+    - name: Configure postgresql.conf
+      ansible.builtin.lineinfile:
+        path: "{{ postgres__data_dir }}/postgresql.conf"
+        regexp: "^#?{{ item.key | regex_escape() }}\\s*="
+        line: >-
+          {{ item.key }} = {{ item.value if (item.value | string) is match('^[0-9]+$')
+             else "'" ~ item.value ~ "'" }}
+        owner: postgres
+        group: postgres
+        mode: "0600"
+      loop: "{{ __opts_default | combine(postgres__opts) | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      notify:
+        - Restart PostgreSQL
+
+    - name: Configure pg_hba.conf
+      ansible.builtin.template:
+        src: pg_hba.conf.j2
+        dest: "{{ postgres__data_dir }}/pg_hba.conf"
+        owner: postgres
+        group: postgres
+        mode: "0600"
+      notify:
+        - Reload PostgreSQL
+
+    # своя служба, тк у пакетной другой каталог данных
+    - name: Copy PostgreSQL systemd service
+      ansible.builtin.template:
+        src: postgres.service.j2
+        dest: "/etc/systemd/system/{{ postgres__service_name }}.service"
+        owner: root
+        group: root
+        mode: "0644"
+      notify:
+        - Daemon reload
+        - Restart PostgreSQL
+
+    # чтоб рестарт был до проверки
+    - name: Flush handlers
+      ansible.builtin.meta: flush_handlers
+
+    - name: Enable PostgreSQL service now
+      ansible.builtin.systemd_service:
+        name: "{{ postgres__service_name }}.service"
+        enabled: true
+        state: started
+
+    - name: Check PostgreSQL (SELECT 1)
+      community.postgresql.postgresql_query:
+        query: SELECT 1 AS ok
+        login_unix_socket: "{{ __pg_socket_dir }}"
+        port: "{{ postgres__port }}"
+      become_user: postgres
+      register: __select_result
+      changed_when: false
+      retries: 5
+      delay: 3
+      until: __select_result is succeeded
+
+    - name: Show SELECT 1 result
+      ansible.builtin.debug:
+        var: __select_result.query_result
+
+    - name: Create users
+      community.postgresql.postgresql_user:
+        name: "{{ item.name }}"
+        password: "{{ item.password }}"
+        role_attr_flags: "{{ item.attrs | default(omit) }}"
+        login_unix_socket: "{{ __pg_socket_dir }}"
+        port: "{{ postgres__port }}"
+      become_user: postgres
+      loop: "{{ postgres__users }}"
+      loop_control:
+        label: "{{ item.name }}"
+      no_log: true  # чтоб пароли в лог не слить
+
+    - name: Create databases
+      community.postgresql.postgresql_db:
+        name: "{{ item.name }}"
+        owner: "{{ item.owner | default(omit) }}"
+        encoding: UTF-8
+        login_unix_socket: "{{ __pg_socket_dir }}"
+        port: "{{ postgres__port }}"
+      become_user: postgres
+      loop: "{{ postgres__databases }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    # для экспортера отдельный юзер
+    - name: Create exporter user
+      community.postgresql.postgresql_user:
+        name: "{{ postgres__exporter_user }}"
+        password: "{{ postgres__exporter_password }}"
+        login_unix_socket: "{{ __pg_socket_dir }}"
+        port: "{{ postgres__port }}"
+      become_user: postgres
+      no_log: true
+
+    - name: Grant pg_monitor to exporter user
+      community.postgresql.postgresql_membership:
+        groups: pg_monitor
+        target_roles: "{{ postgres__exporter_user }}"
+        login_unix_socket: "{{ __pg_socket_dir }}"
+        port: "{{ postgres__port }}"
+      become_user: postgres
+
+    - name: Download exporter on controller
+      delegate_to: localhost
+      become: false
+      run_once: true
+      block:
+        - name: Create download dir
+          ansible.builtin.file:
+            path: "{{ __exporter_download_dir }}"
+            mode: "0755"
+            state: directory
+
+        - name: Download exporter
+          ansible.builtin.unarchive:
+            src: "{{ __exporter_url }}"
+            dest: "{{ __exporter_download_dir }}"
+            remote_src: true
+            creates: "{{ __exporter_download_dir }}/{{ __exporter_name }}/postgres_exporter"
+
+    - name: Copy exporter executable
+      ansible.builtin.copy:
+        src: "{{ __exporter_download_dir }}/{{ __exporter_name }}/postgres_exporter"
+        dest: "{{ __exporter_bin }}"
+        owner: root
+        group: root
+        mode: "0755"
+      notify:
+        - Restart postgres-exporter
+
+    - name: Copy exporter env file
+      ansible.builtin.copy:
+        content: |
+          DATA_SOURCE_NAME=postgresql://{{ postgres__exporter_user }}:{{ postgres__exporter_password | urlencode | replace('/', '%2F') }}@127.0.0.1:{{ postgres__port }}/postgres?sslmode=disable
+        dest: "{{ __exporter_env_file }}"
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+      notify:
+        - Restart postgres-exporter
+
+    - name: Copy postgres-exporter systemd service
+      ansible.builtin.template:
+        src: postgres-exporter.service.j2
+        dest: /etc/systemd/system/postgres-exporter.service
+        owner: root
+        group: root
+        mode: "0644"
+      notify:
+        - Daemon reload
+        - Restart postgres-exporter
+
+    - name: Flush handlers
+      ansible.builtin.meta: flush_handlers
+
+    - name: Start postgres-exporter service
+      ansible.builtin.systemd_service:
+        name: postgres-exporter.service
+        enabled: true
+        state: started
+
+    - name: Check exporter metrics (pg_up 1)
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ postgres__exporter_port }}/metrics"
+        return_content: true
+      register: __metrics
+      retries: 6
+      delay: 5
+      until: "'pg_up 1' in __metrics.content"

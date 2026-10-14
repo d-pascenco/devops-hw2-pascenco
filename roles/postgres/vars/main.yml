@@ -1,0 +1,18 @@
+__pg_bin_dir: /usr/bin
+__pg_packages:
+  - postgresql
+  - python-psycopg2
+
+# директория для сокета
+__pg_socket_dir: "/run/{{ postgres__service_name }}"
+
+__opts_default:
+  port: "{{ postgres__port }}"
+  unix_socket_directories: "{{ __pg_socket_dir }}"
+
+__exporter_name: "postgres_exporter-{{ postgres__exporter_version }}.linux-amd64"
+__exporter_url: >-
+  https://github.com/prometheus-community/postgres_exporter/releases/download/v{{ postgres__exporter_version }}/{{ __exporter_name }}.tar.gz
+__exporter_download_dir: /tmp/postgres-exporter
+__exporter_bin: /usr/local/bin/postgres_exporter
+__exporter_env_file: /etc/postgres-exporter.env

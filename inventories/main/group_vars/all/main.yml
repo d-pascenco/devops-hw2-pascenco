@@ -1,0 +1,15 @@
+# пасы тащу из vault.yml
+postgres__users:
+  - name: app
+    password: "{{ vault_postgres_app_password }}"
+  - name: analyst
+    password: "{{ vault_postgres_analyst_password }}"
+    attrs: CREATEDB
+
+postgres__databases:
+  - name: appdb
+    owner: app
+  - name: reports
+    owner: analyst
+
+postgres__exporter_password: "{{ vault_postgres_exporter_password }}"

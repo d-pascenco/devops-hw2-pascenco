@@ -1,0 +1,19 @@
+{{ ansible_managed | comment }}
+
+[Unit]
+Description=Prometheus PostgreSQL exporter
+Documentation=https://github.com/prometheus-community/postgres_exporter
+Wants={{ postgres__service_name }}.service
+After={{ postgres__service_name }}.service
+
+[Service]
+Type=simple
+# отдельный временный пользователь, под root экспортер запускать незачем
+DynamicUser=true
+EnvironmentFile={{ __exporter_env_file }}
+ExecStart={{ __exporter_bin }} --web.listen-address=:{{ postgres__exporter_port }}
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target

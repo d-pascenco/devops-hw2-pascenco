@@ -1,0 +1,22 @@
+{{ ansible_managed | comment }}
+
+[Unit]
+Description=PostgreSQL database server ({{ postgres__data_dir }})
+After=network.target
+
+[Service]
+Type=notify
+User=postgres
+Group=postgres
+Environment=PGDATA={{ postgres__data_dir }}
+# /run/{{ postgres__service_name }} для сокета, создаётся и удаляется самим systemd
+RuntimeDirectory={{ postgres__service_name }}
+RuntimeDirectoryMode=0755
+ExecStart={{ __pg_bin_dir }}/postgres -D {{ postgres__data_dir }}
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=mixed
+KillSignal=SIGINT
+TimeoutSec=120
+
+[Install]
+WantedBy=multi-user.target

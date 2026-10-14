@@ -1,0 +1,4 @@
+collections:
+  - name: community.general      # пакман
+  - name: community.postgresql
+  - name: ansible.posix           # profile_tasks
